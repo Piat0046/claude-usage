@@ -9,6 +9,8 @@ class UsageViewModel: ObservableObject {
     @Published var error: String?
     @Published var lastUpdated: Date?
     @Published var isConnected = false
+    @Published var availableMetrics: [String] = []
+    @Published var debugInfo: String = ""
 
     // MARK: - Metrics
     @Published var localMetrics: AggregatedMetrics = AggregatedMetrics()
@@ -188,15 +190,31 @@ class UsageViewModel: ObservableObject {
         return connected
     }
 
+    func fetchAvailableMetrics() async {
+        guard let service = prometheusService else {
+            availableMetrics = []
+            return
+        }
+
+        do {
+            let metrics = try await service.getAvailableMetrics()
+            availableMetrics = metrics
+        } catch {
+            availableMetrics = []
+        }
+    }
+
     func refresh() async {
         isLoading = true
         error = nil
+        debugInfo = ""
 
         // Check connection first
         let connected = await checkConnection()
 
         guard connected, let service = prometheusService else {
             error = "Cannot connect to Prometheus at \(prometheusEndpoint)"
+            debugInfo = "Prometheus connection failed. Make sure:\n1. Docker containers are running\n2. Prometheus is accessible at \(prometheusEndpoint)"
             isLoading = false
             return
         }
@@ -207,11 +225,11 @@ class UsageViewModel: ObservableObject {
             let weeklyMetrics = try await service.getMetricsSince(period.start)
 
             localMetrics = AggregatedMetrics(
-                totalCost: calculateCost(input: weeklyMetrics.inputTokens, output: weeklyMetrics.outputTokens),
+                totalCost: weeklyMetrics.cost,
                 inputTokens: weeklyMetrics.inputTokens,
                 outputTokens: weeklyMetrics.outputTokens,
-                sessionCount: 0,
-                activeTimeSeconds: 0,
+                sessionCount: weeklyMetrics.sessions,
+                activeTimeSeconds: weeklyMetrics.activeTimeSeconds,
                 linesOfCode: 0,
                 commitCount: 0,
                 promptCount: 0,
@@ -224,11 +242,11 @@ class UsageViewModel: ObservableObject {
             let sessionMetrics = try await service.getMetricsSince(sessionPeriod.start)
 
             currentSessionMetrics = AggregatedMetrics(
-                totalCost: calculateCost(input: sessionMetrics.inputTokens, output: sessionMetrics.outputTokens),
+                totalCost: sessionMetrics.cost,
                 inputTokens: sessionMetrics.inputTokens,
                 outputTokens: sessionMetrics.outputTokens,
-                sessionCount: 0,
-                activeTimeSeconds: 0,
+                sessionCount: sessionMetrics.sessions,
+                activeTimeSeconds: sessionMetrics.activeTimeSeconds,
                 linesOfCode: 0,
                 commitCount: 0,
                 promptCount: 0,
@@ -240,6 +258,7 @@ class UsageViewModel: ObservableObject {
 
         } catch {
             self.error = "Failed to fetch metrics: \(error.localizedDescription)"
+            debugInfo = "Query error: \(error.localizedDescription)"
         }
 
         isLoading = false

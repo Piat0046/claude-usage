@@ -5,6 +5,14 @@ struct EnvItem: Identifiable {
     var key: String
     var value: String
     let isSystem: Bool
+    let isReadOnly: Bool  // OTel endpoint is managed via OTel settings modal
+
+    init(key: String, value: String, isSystem: Bool, isReadOnly: Bool = false) {
+        self.key = key
+        self.value = value
+        self.isSystem = isSystem
+        self.isReadOnly = isReadOnly
+    }
 }
 
 struct ClaudeEnvEditorView: View {
@@ -177,6 +185,8 @@ struct ClaudeEnvEditorView: View {
         }
     }
 
+    private let readOnlyKeys = ["OTEL_EXPORTER_OTLP_ENDPOINT"]
+
     private func loadCurrentSettings() {
         let currentEnv = ClaudeConfigService.getAllEnv()
         var items: [EnvItem] = []
@@ -185,7 +195,8 @@ struct ClaudeEnvEditorView: View {
             items.append(EnvItem(
                 key: key,
                 value: currentEnv[key] ?? defaultEnv[key] ?? "",
-                isSystem: true
+                isSystem: true,
+                isReadOnly: readOnlyKeys.contains(key)
             ))
         }
 
@@ -310,15 +321,30 @@ struct EnvTableRow: View {
                     .frame(height: 22)
 
                 // Value cell
-                TextField("Value", text: $editingValue)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 12, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 4)
-                    .onChange(of: editingValue) { newValue in
-                        onValueChange(newValue)
+                Group {
+                    if item.isReadOnly {
+                        HStack(spacing: 4) {
+                            Text(item.value.isEmpty ? "(not set)" : item.value)
+                                .font(.system(size: 12, design: .monospaced))
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Image(systemName: "lock.fill")
+                                .font(.system(size: 10))
+                                .foregroundColor(.secondary)
+                                .help("Managed via OTel Collector settings")
+                        }
+                    } else {
+                        TextField("Value", text: $editingValue)
+                            .textFieldStyle(.plain)
+                            .font(.system(size: 12, design: .monospaced))
+                            .onChange(of: editingValue) { newValue in
+                                onValueChange(newValue)
+                            }
                     }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
 
                 // Delete button
                 Group {

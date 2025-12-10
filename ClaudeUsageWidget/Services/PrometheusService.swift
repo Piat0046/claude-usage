@@ -158,46 +158,94 @@ class PrometheusService {
         return result.result
     }
 
+    // MARK: - Metric Discovery
+
+    /// Get all available metric names matching a pattern
+    func getAvailableMetrics(pattern: String = "claude") async throws -> [String] {
+        let url = baseURL.appendingPathComponent("/api/v1/label/__name__/values")
+        let (data, _) = try await session.data(from: url)
+
+        struct LabelResponse: Decodable {
+            let status: String
+            let data: [String]?
+        }
+
+        let response = try JSONDecoder().decode(LabelResponse.self, from: data)
+
+        guard response.status == "success", let names = response.data else {
+            return []
+        }
+
+        return names.filter { $0.contains(pattern) }
+    }
+
     // MARK: - Claude Code Specific Queries
 
-    /// Get total input tokens
+    // Actual metric names from Claude Code telemetry (with OTel namespace "claude")
+    // claude_claude_code_token_usage_tokens_total{type="input|output|cacheCreation|cacheRead"}
+    // claude_claude_code_cost_usage_USD_total
+    // claude_claude_code_session_count_total
+    // claude_claude_code_active_time_seconds_total
+
+    /// Get total input tokens (including cache creation)
     func getTotalInputTokens() async throws -> Double {
-        let metrics = try await query("sum(claude_code_input_tokens_total)")
+        let metrics = try await query("sum(claude_claude_code_token_usage_tokens_total{type=~\"input|cacheCreation\"})")
         return metrics.first?.value?.last?.doubleValue ?? 0
     }
 
     /// Get total output tokens
     func getTotalOutputTokens() async throws -> Double {
-        let metrics = try await query("sum(claude_code_output_tokens_total)")
+        let metrics = try await query("sum(claude_claude_code_token_usage_tokens_total{type=\"output\"})")
         return metrics.first?.value?.last?.doubleValue ?? 0
     }
 
-    /// Get total API requests
-    func getTotalApiRequests() async throws -> Double {
-        let metrics = try await query("sum(claude_code_api_requests_total)")
+    /// Get total cost in USD
+    func getTotalCost() async throws -> Double {
+        let metrics = try await query("sum(claude_claude_code_cost_usage_USD_total)")
+        return metrics.first?.value?.last?.doubleValue ?? 0
+    }
+
+    /// Get session count
+    func getSessionCount() async throws -> Double {
+        let metrics = try await query("sum(claude_claude_code_session_count_total)")
+        return metrics.first?.value?.last?.doubleValue ?? 0
+    }
+
+    /// Get active time in seconds
+    func getActiveTime() async throws -> Double {
+        let metrics = try await query("sum(claude_claude_code_active_time_seconds_total)")
         return metrics.first?.value?.last?.doubleValue ?? 0
     }
 
     /// Get metrics since a specific time
     func getMetricsSince(_ startDate: Date) async throws -> ClaudeMetrics {
         let now = Date()
-        let startTimestamp = Int(startDate.timeIntervalSince1970)
+        let seconds = max(Int(now.timeIntervalSince(startDate)), 60)
 
-        // Query for tokens since start date
-        let inputTokensQuery = "sum(increase(claude_code_input_tokens_total[\(Int(now.timeIntervalSince(startDate)))s]))"
-        let outputTokensQuery = "sum(increase(claude_code_output_tokens_total[\(Int(now.timeIntervalSince(startDate)))s]))"
-        let apiRequestsQuery = "sum(increase(claude_code_api_requests_total[\(Int(now.timeIntervalSince(startDate)))s]))"
+        // Query for metrics in the time window
+        let inputQuery = "sum(increase(claude_claude_code_token_usage_tokens_total{type=~\"input|cacheCreation\"}[\(seconds)s]))"
+        let outputQuery = "sum(increase(claude_claude_code_token_usage_tokens_total{type=\"output\"}[\(seconds)s]))"
+        let costQuery = "sum(increase(claude_claude_code_cost_usage_USD_total[\(seconds)s]))"
+        let sessionQuery = "sum(increase(claude_claude_code_session_count_total[\(seconds)s]))"
+        let activeTimeQuery = "sum(increase(claude_claude_code_active_time_seconds_total[\(seconds)s]))"
+        let apiRequestQuery = "sum(increase(claude_claude_code_api_request_count_total[\(seconds)s]))"
 
-        async let inputTokens = query(inputTokensQuery)
-        async let outputTokens = query(outputTokensQuery)
-        async let apiRequests = query(apiRequestsQuery)
+        async let inputTokens = query(inputQuery)
+        async let outputTokens = query(outputQuery)
+        async let cost = query(costQuery)
+        async let sessions = query(sessionQuery)
+        async let activeTime = query(activeTimeQuery)
+        async let apiRequests = query(apiRequestQuery)
 
-        let (input, output, requests) = try await (inputTokens, outputTokens, apiRequests)
+        let (input, output, costResult, sessionResult, activeResult, apiResult) = try await (inputTokens, outputTokens, cost, sessions, activeTime, apiRequests)
 
         return ClaudeMetrics(
             inputTokens: Int(input.first?.value?.last?.doubleValue ?? 0),
             outputTokens: Int(output.first?.value?.last?.doubleValue ?? 0),
-            apiRequests: Int(requests.first?.value?.last?.doubleValue ?? 0)
+            cost: costResult.first?.value?.last?.doubleValue ?? 0,
+            sessions: Int(sessionResult.first?.value?.last?.doubleValue ?? 0),
+            activeTimeSeconds: Int(activeResult.first?.value?.last?.doubleValue ?? 0),
+            apiRequests: Int(apiResult.first?.value?.last?.doubleValue ?? 0)
         )
     }
 
@@ -205,15 +253,15 @@ class PrometheusService {
     func getHourlyMetrics(start: Date, end: Date) async throws -> [HourlyMetricData] {
         let step: TimeInterval = 3600 // 1 hour
 
-        let inputQuery = "sum(increase(claude_code_input_tokens_total[1h]))"
-        let outputQuery = "sum(increase(claude_code_output_tokens_total[1h]))"
-        let apiRequestsQuery = "sum(increase(claude_code_api_requests_total[1h]))"
+        let inputQuery = "sum(increase(claude_claude_code_token_usage_tokens_total{type=~\"input|cacheCreation\"}[1h]))"
+        let outputQuery = "sum(increase(claude_claude_code_token_usage_tokens_total{type=\"output\"}[1h]))"
+        let sessionQuery = "sum(increase(claude_claude_code_session_count_total[1h]))"
 
         async let inputMetrics = queryRange(inputQuery, start: start, end: end, step: step)
         async let outputMetrics = queryRange(outputQuery, start: start, end: end, step: step)
-        async let apiMetrics = queryRange(apiRequestsQuery, start: start, end: end, step: step)
+        async let sessionMetrics = queryRange(sessionQuery, start: start, end: end, step: step)
 
-        let (inputs, outputs, apis) = try await (inputMetrics, outputMetrics, apiMetrics)
+        let (inputs, outputs, sessions) = try await (inputMetrics, outputMetrics, sessionMetrics)
 
         var hourlyData: [HourlyMetricData] = []
 
@@ -225,13 +273,13 @@ class PrometheusService {
                       let inputValue = values[1].doubleValue else { continue }
 
                 let outputValue = outputs.first?.values?[safe: index]?[safe: 1]?.doubleValue ?? 0
-                let apiValue = apis.first?.values?[safe: index]?[safe: 1]?.doubleValue ?? 0
+                let sessionValue = sessions.first?.values?[safe: index]?[safe: 1]?.doubleValue ?? 0
 
                 hourlyData.append(HourlyMetricData(
                     timestamp: Date(timeIntervalSince1970: timestamp),
                     inputTokens: Int(inputValue),
                     outputTokens: Int(outputValue),
-                    apiRequests: Int(apiValue)
+                    apiRequests: Int(sessionValue)
                 ))
             }
         }
@@ -244,6 +292,9 @@ class PrometheusService {
 struct ClaudeMetrics {
     let inputTokens: Int
     let outputTokens: Int
+    let cost: Double
+    let sessions: Int
+    let activeTimeSeconds: Int
     let apiRequests: Int
 
     var totalTokens: Int { inputTokens + outputTokens }

@@ -20,6 +20,19 @@ struct SettingsView: View {
     // Claude env editor
     @State private var showClaudeEnvEditor = false
 
+    // Prometheus settings modal
+    @State private var showPrometheusSettings = false
+
+    // OTel settings modal
+    @State private var showOTelSettings = false
+
+    // Available metrics popover
+    @State private var showAvailableMetrics = false
+
+    // OTel Collector status
+    @State private var otelCollectorConnected = false
+    @AppStorage("otelHttpPort") private var otelHttpPort: Int = 4318
+
     var body: some View {
         TabView {
             generalTab
@@ -46,6 +59,36 @@ struct SettingsView: View {
         .sheet(isPresented: $showClaudeEnvEditor) {
             ClaudeEnvEditorView()
         }
+        .sheet(isPresented: $showPrometheusSettings) {
+            PrometheusSettingsView(
+                host: $prometheusHost,
+                port: $prometheusPort,
+                onSave: {
+                    applyPrometheusSettings()
+                    Task {
+                        await viewModel.refresh()
+                    }
+                }
+            )
+        }
+        .sheet(isPresented: $showOTelSettings) {
+            OTelSettingsView(
+                endpoint: $otelEndpoint,
+                httpPort: $otelHttpPort,
+                onSave: { newEndpoint in
+                    do {
+                        try ClaudeConfigService.updateEndpoint(newEndpoint)
+                        otelEndpoint = newEndpoint
+                        statusMessage = "OTel endpoint updated. Restart Claude Code to apply."
+                        Task {
+                            await checkOTelCollectorConnection()
+                        }
+                    } catch {
+                        statusMessage = "Failed: \(error.localizedDescription)"
+                    }
+                }
+            )
+        }
         .onAppear {
             refreshStatus()
             loadHourlyMetrics()
@@ -55,6 +98,37 @@ struct SettingsView: View {
     // MARK: - General Tab
     private var generalTab: some View {
         Form {
+            // Connection Status
+            if !viewModel.isConnected || viewModel.error != nil {
+                Section {
+                    HStack {
+                        Image(systemName: viewModel.isConnected ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                            .foregroundColor(viewModel.isConnected ? .green : .orange)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(viewModel.isConnected ? "Connected" : "Not Connected")
+                                .font(.headline)
+                            if let error = viewModel.error {
+                                Text(error)
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                        Spacer()
+                        if viewModel.isLoading {
+                            ProgressView()
+                                .scaleEffect(0.7)
+                        } else {
+                            Button("Retry") {
+                                Task { await viewModel.refresh() }
+                            }
+                            .buttonStyle(.bordered)
+                        }
+                    }
+                } header: {
+                    Text("Status")
+                }
+            }
+
             // Current Session (6-hour block)
             Section {
                 HStack {
@@ -358,7 +432,48 @@ struct SettingsView: View {
                     .foregroundColor(.secondary)
             }
 
-            // Prometheus Connection
+            // OTel Collector Connection (Claude Code → OTel)
+            Section {
+                HStack {
+                    Text("Status")
+                    Spacer()
+                    Text(otelCollectorConnected ? "Connected" : "Disconnected")
+                        .foregroundColor(.secondary)
+                    Circle()
+                        .fill(otelCollectorConnected ? Color.green : Color.red)
+                        .frame(width: 8, height: 8)
+                }
+
+                HStack {
+                    Text("gRPC Endpoint")
+                    Spacer()
+                    Text(otelEndpoint.isEmpty ? "Not configured" : otelEndpoint)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+
+                HStack {
+                    Text("HTTP Port")
+                    Spacer()
+                    Text("\(otelHttpPort)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                Button("Configure") {
+                    showOTelSettings = true
+                }
+                .buttonStyle(.bordered)
+            } header: {
+                Text("OTel Collector")
+            } footer: {
+                Text("Claude Code sends telemetry via gRPC. HTTP port is used for status check.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            // Prometheus Connection (App → Prometheus)
             Section {
                 HStack {
                     Text("Status")
@@ -378,46 +493,59 @@ struct SettingsView: View {
                         .foregroundColor(.secondary)
                 }
 
-                if let lastUpdate = viewModel.lastUpdated {
-                    HStack {
-                        Text("Last Update")
-                        Spacer()
-                        Text(lastUpdate, style: .relative)
-                            .foregroundColor(.secondary)
+                HStack {
+                    Button("Configure") {
+                        showPrometheusSettings = true
+                    }
+                    .buttonStyle(.bordered)
+
+                    Button("View Metrics") {
+                        Task {
+                            await viewModel.fetchAvailableMetrics()
+                        }
+                        showAvailableMetrics = true
+                    }
+                    .buttonStyle(.bordered)
+                    .popover(isPresented: $showAvailableMetrics) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text("Available Metrics")
+                                    .font(.headline)
+                                Spacer()
+                                Text("\(viewModel.availableMetrics.count)")
+                                    .foregroundColor(.secondary)
+                            }
+                            .padding(.bottom, 4)
+
+                            Divider()
+
+                            if viewModel.availableMetrics.isEmpty {
+                                Text("No metrics found")
+                                    .foregroundColor(.secondary)
+                                    .padding(.vertical, 8)
+                            } else {
+                                ScrollView {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        ForEach(viewModel.availableMetrics, id: \.self) { metric in
+                                            Text(metric)
+                                                .font(.system(size: 11, design: .monospaced))
+                                                .foregroundColor(.secondary)
+                                        }
+                                    }
+                                }
+                                .frame(maxHeight: 200)
+                            }
+                        }
+                        .padding()
+                        .frame(width: 350)
                     }
                 }
-
-                HStack {
-                    Text("Host")
-                    Spacer()
-                    TextField("localhost", text: $prometheusHost)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 150)
-                        .onSubmit {
-                            applyPrometheusSettings()
-                        }
-                }
-
-                HStack {
-                    Text("Port")
-                    Spacer()
-                    TextField("9090", text: $prometheusPort)
-                        .textFieldStyle(.roundedBorder)
-                        .frame(width: 80)
-                        .onSubmit {
-                            applyPrometheusSettings()
-                        }
-                }
-
-                Button("Test Connection") {
-                    applyPrometheusSettings()
-                    Task {
-                        await viewModel.refresh()
-                    }
-                }
-                .buttonStyle(.bordered)
             } header: {
                 Text("Prometheus")
+            } footer: {
+                Text("App queries metrics from Prometheus")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
             }
 
             // Claude Code Telemetry Section
@@ -586,6 +714,43 @@ struct SettingsView: View {
         otelEndpoint = ClaudeConfigService.getOTelEndpoint()
         prometheusHost = viewModel.prometheusHost
         prometheusPort = String(viewModel.prometheusPort)
+
+        // Check OTel Collector connection
+        Task {
+            await checkOTelCollectorConnection()
+        }
+    }
+
+    private func checkOTelCollectorConnection() async {
+        // Extract host from gRPC endpoint and use HTTP port for health check
+        guard !otelEndpoint.isEmpty,
+              let endpointURL = URL(string: otelEndpoint),
+              let host = endpointURL.host else {
+            await MainActor.run { otelCollectorConnected = false }
+            return
+        }
+
+        // Use HTTP port for status check
+        let httpEndpoint = "http://\(host):\(otelHttpPort)"
+        guard let url = URL(string: httpEndpoint) else {
+            await MainActor.run { otelCollectorConnected = false }
+            return
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 3
+
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            if let httpResponse = response as? HTTPURLResponse {
+                // OTel Collector returns 200, 400, 404, or 415 when reachable
+                let connected = [200, 400, 404, 415].contains(httpResponse.statusCode)
+                await MainActor.run { otelCollectorConnected = connected }
+            }
+        } catch {
+            await MainActor.run { otelCollectorConnected = false }
+        }
     }
 
     private func applyPrometheusSettings() {
@@ -845,6 +1010,292 @@ struct OTelSettingsModal: View {
             return .success
         } else {
             return .failure("Connection refused")
+        }
+    }
+}
+
+// MARK: - OTel Settings Modal
+struct OTelSettingsView: View {
+    @Binding var endpoint: String
+    @Binding var httpPort: Int
+    var onSave: (String) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var tempEndpoint: String = ""
+    @State private var tempHttpPort: String = ""
+    @State private var testResult: String = ""
+    @State private var isTesting: Bool = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                Text("OTel Collector Settings")
+                    .font(.headline)
+                Spacer()
+                Button(action: { dismiss() }) {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding()
+
+            Divider()
+
+            // Content
+            Form {
+                Section {
+                    TextField("http://localhost:4317", text: $tempEndpoint)
+                        .textFieldStyle(.roundedBorder)
+                } header: {
+                    Text("gRPC Endpoint (for Claude Code)")
+                } footer: {
+                    Text("Claude Code sends telemetry to this endpoint")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                Section {
+                    TextField("4318", text: $tempHttpPort)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 100)
+                } header: {
+                    Text("HTTP Port (for status check)")
+                } footer: {
+                    Text("Used to verify OTel Collector is running")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                if !testResult.isEmpty {
+                    Section {
+                        HStack {
+                            Image(systemName: testResult.contains("Success") ? "checkmark.circle.fill" : "xmark.circle.fill")
+                                .foregroundColor(testResult.contains("Success") ? .green : .red)
+                            Text(testResult)
+                                .font(.caption)
+                        }
+                    }
+                }
+            }
+            .formStyle(.grouped)
+
+            Divider()
+
+            // Footer
+            HStack {
+                Button("Test Connection") {
+                    testConnection()
+                }
+                .buttonStyle(.bordered)
+                .disabled(isTesting || tempEndpoint.isEmpty)
+
+                Spacer()
+
+                Button("Cancel") {
+                    dismiss()
+                }
+                .buttonStyle(.bordered)
+
+                Button("Save") {
+                    httpPort = Int(tempHttpPort) ?? 4318
+                    onSave(tempEndpoint)
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(tempEndpoint.isEmpty)
+            }
+            .padding()
+        }
+        .frame(width: 400, height: 320)
+        .onAppear {
+            tempHttpPort = String(httpPort)
+            tempEndpoint = endpoint
+        }
+    }
+
+    private func testConnection() {
+        isTesting = true
+        testResult = ""
+
+        // Extract host from gRPC endpoint and use HTTP port for test
+        guard let endpointURL = URL(string: tempEndpoint),
+              let host = endpointURL.host else {
+            testResult = "Failed: Invalid endpoint URL"
+            isTesting = false
+            return
+        }
+
+        let port = Int(tempHttpPort) ?? 4318
+        let httpEndpoint = "http://\(host):\(port)"
+
+        guard let url = URL(string: httpEndpoint) else {
+            testResult = "Failed: Invalid HTTP URL"
+            isTesting = false
+            return
+        }
+
+        Task {
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.timeoutInterval = 5
+
+            do {
+                let (_, response) = try await URLSession.shared.data(for: request)
+                if let httpResponse = response as? HTTPURLResponse {
+                    // OTel collector returns 200, 400, 404, or 415 when reachable
+                    if [200, 400, 404, 415].contains(httpResponse.statusCode) {
+                        await MainActor.run {
+                            testResult = "Success: OTel Collector is reachable at \(httpEndpoint)"
+                            isTesting = false
+                        }
+                    } else {
+                        await MainActor.run {
+                            testResult = "Warning: Status \(httpResponse.statusCode)"
+                            isTesting = false
+                        }
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    testResult = "Failed: \(error.localizedDescription)"
+                    isTesting = false
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Prometheus Settings Modal
+struct PrometheusSettingsView: View {
+    @Binding var host: String
+    @Binding var port: String
+    var onSave: () -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var tempHost: String = ""
+    @State private var tempPort: String = ""
+    @State private var testResult: String = ""
+    @State private var isTesting: Bool = false
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // Header
+            HStack {
+                Text("Prometheus Settings")
+                    .font(.headline)
+                Spacer()
+                Button(action: { dismiss() }) {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding()
+
+            Divider()
+
+            // Content
+            Form {
+                Section {
+                    HStack {
+                        Text("Host")
+                            .frame(width: 50, alignment: .leading)
+                        TextField("localhost", text: $tempHost)
+                            .textFieldStyle(.roundedBorder)
+                    }
+
+                    HStack {
+                        Text("Port")
+                            .frame(width: 50, alignment: .leading)
+                        TextField("9090", text: $tempPort)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 100)
+                        Spacer()
+                    }
+                } header: {
+                    Text("Connection")
+                }
+
+                if !testResult.isEmpty {
+                    Section {
+                        HStack {
+                            Image(systemName: testResult.contains("Success") ? "checkmark.circle.fill" : "xmark.circle.fill")
+                                .foregroundColor(testResult.contains("Success") ? .green : .red)
+                            Text(testResult)
+                                .font(.caption)
+                        }
+                    }
+                }
+            }
+            .formStyle(.grouped)
+
+            Divider()
+
+            // Footer
+            HStack {
+                Button("Test Connection") {
+                    testConnection()
+                }
+                .buttonStyle(.bordered)
+                .disabled(isTesting)
+
+                Spacer()
+
+                Button("Cancel") {
+                    dismiss()
+                }
+                .buttonStyle(.bordered)
+
+                Button("Save") {
+                    host = tempHost.isEmpty ? "localhost" : tempHost
+                    port = tempPort.isEmpty ? "9090" : tempPort
+                    onSave()
+                    dismiss()
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            .padding()
+        }
+        .frame(width: 350, height: 280)
+        .onAppear {
+            tempHost = host
+            tempPort = port
+        }
+    }
+
+    private func testConnection() {
+        isTesting = true
+        testResult = ""
+
+        let testHost = tempHost.isEmpty ? "localhost" : tempHost
+        let testPort = Int(tempPort) ?? 9090
+
+        Task {
+            let url = URL(string: "http://\(testHost):\(testPort)/api/v1/status/runtimeinfo")!
+            var request = URLRequest(url: url)
+            request.timeoutInterval = 5
+
+            do {
+                let (_, response) = try await URLSession.shared.data(for: request)
+                if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 {
+                    await MainActor.run {
+                        testResult = "Success: Connected to Prometheus"
+                        isTesting = false
+                    }
+                } else {
+                    await MainActor.run {
+                        testResult = "Failed: Invalid response"
+                        isTesting = false
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    testResult = "Failed: \(error.localizedDescription)"
+                    isTesting = false
+                }
+            }
         }
     }
 }

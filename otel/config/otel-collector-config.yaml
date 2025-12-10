@@ -23,6 +23,19 @@ processors:
         value: claude-code
         action: upsert
 
+connectors:
+  # Count log events as metrics
+  count:
+    logs:
+      claude_code.api_request.count:
+        description: "Count of API requests"
+        conditions:
+          - 'body == "claude_code.api_request"'
+      claude_code.user_prompt.count:
+        description: "Count of user prompts"
+        conditions:
+          - 'body == "claude_code.user_prompt"'
+
 exporters:
   # Prometheus exporter (for scraping)
   prometheus:
@@ -37,15 +50,11 @@ exporters:
     tls:
       insecure: true
 
-  # Loki exporter for logs
-  loki:
-    endpoint: "http://loki:3100/loki/api/v1/push"
-    labels:
-      attributes:
-        service.name: "service_name"
-        level: "level"
-      resource:
-        service.name: "service_name"
+  # Loki via OTLP HTTP (Loki 3.0+ supports OTLP)
+  otlphttp/loki:
+    endpoint: "http://loki:3100/otlp"
+    tls:
+      insecure: true
 
   # Debug exporter (for troubleshooting)
   debug:
@@ -53,15 +62,17 @@ exporters:
 
 service:
   pipelines:
+    # Metrics from OTLP + counted logs
     metrics:
-      receivers: [otlp]
+      receivers: [otlp, count]
       processors: [memory_limiter, batch, resource]
-      exporters: [prometheus, prometheusremotewrite]
+      exporters: [prometheus, prometheusremotewrite, debug]
 
+    # Logs pipeline - also sends to count connector for metrics conversion
     logs:
       receivers: [otlp]
       processors: [memory_limiter, batch, resource]
-      exporters: [loki]
+      exporters: [otlphttp/loki, count, debug]
 
     traces:
       receivers: [otlp]

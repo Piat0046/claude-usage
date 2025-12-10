@@ -1,0 +1,33 @@
+name: ClaudeUsageWidget
+options:
+  bundleIdPrefix: com.claude
+  deploymentTarget:
+    macOS: "13.0"
+  xcodeVersion: "15.0"
+
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    MACOSX_DEPLOYMENT_TARGET: "13.0"
+
+targets:
+  ClaudeUsageWidget:
+    type: application
+    platform: macOS
+    sources:
+      - path: .
+        excludes:
+          - project.yml
+          - "*.xcodeproj"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.claude.usage-widget
+        PRODUCT_NAME: ClaudeUsageWidget
+        INFOPLIST_FILE: Resources/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        CODE_SIGN_ENTITLEMENTS: Resources/ClaudeUsageWidget.entitlements
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_IDENTITY: "-"
+        LD_RUNPATH_SEARCH_PATHS: "@executable_path/../Frameworks"
+    entitlements:
+      path: Resources/ClaudeUsageWidget.entitlements

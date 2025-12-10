@@ -1,0 +1,19 @@
+# OTel data
+otel/data/
+
+# macOS
+.DS_Store
+*/.DS_Store
+
+# Xcode
+*.xcuserstate
+*.xcuserdatad/
+xcuserdata/
+DerivedData/
+*.xcworkspace/xcuserdata/
+
+# Build
+build/
+*.ipa
+*.dSYM.zip
+*.dSYM
